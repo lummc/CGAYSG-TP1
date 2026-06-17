@@ -19,12 +19,14 @@ let amplitudSuavizada = 0;
 let graves = 0;
 let medios = 0;
 let agudos = 0;
+let sibilantes = 0;
 let diferenciaBandas = 0;
 let duracionSonido = 0;
 let estadoSonoro = "silencio";
+let duracionSostenido = 2200;
 
-let umbralSonido = 0.008;
-let umbralAlto = 0.025;
+let umbralSonido = 0.005;
+let umbralAlto = 0.014;
 let ultimoAgregar = 0;
 let ultimoBorrar = 0;
 let ultimoFondo = 0;
@@ -142,6 +144,7 @@ function analizarAudio() {
     graves = 0;
     medios = 0;
     agudos = 0;
+    sibilantes = 0;
     diferenciaBandas = 0;
     duracionSonido = 0;
     return;
@@ -151,9 +154,10 @@ function analizarAudio() {
   amplitudSuavizada = lerp(amplitudSuavizada, amplitud, 0.18);
 
   fft.analyze();
-  graves = fft.getEnergy("bass");
-  medios = fft.getEnergy("mid");
-  agudos = fft.getEnergy("treble");
+  graves = fft.getEnergy(70, 250);
+  medios = fft.getEnergy(250, 1800);
+  agudos = fft.getEnergy(1800, 5000);
+  sibilantes = fft.getEnergy(3000, 9000);
   diferenciaBandas = max(graves, medios, agudos) - min(graves, medios, agudos);
 
   if (amplitudSuavizada > umbralSonido) {
@@ -177,19 +181,26 @@ function actualizarEstadoSonoro() {
   let energiaMaxima = max(graves, medios, agudos);
   let energiaMinima = min(graves, medios, agudos);
   diferenciaBandas = energiaMaxima - energiaMinima;
-  let energiaRepartida = diferenciaBandas < 45 && medios > 18 && agudos > 18;
-  let ruidoAgudo = agudos > 38 && medios > 20 && agudos > graves * 1.15;
-  let posibleNoTonal = amplitudSuavizada > umbralSonido * 1.2 && (energiaRepartida || ruidoAgudo);
-  let posibleAgudo = amplitudSuavizada > umbralAlto && (agudos > graves || medios > graves * 1.2);
+  let energiaTotal = graves + medios + agudos + 1;
+  let proporcionGrave = graves / energiaTotal;
+  let proporcionMedia = medios / energiaTotal;
+  let proporcionAguda = agudos / energiaTotal;
+
+  let energiaRepartida = diferenciaBandas < 35 && medios > 10 && agudos > 10 && proporcionGrave < 0.45;
+  let ruidoSibilante = sibilantes > 8 && (sibilantes > graves * 0.55 || proporcionAguda > 0.24);
+  let posibleNoTonal = amplitudSuavizada > umbralSonido * 0.7 && (ruidoSibilante || energiaRepartida);
+  let posibleAgudo = amplitudSuavizada > umbralAlto && (proporcionAguda > 0.24 || proporcionMedia > proporcionGrave * 1.15);
+  let posibleGrave = amplitudSuavizada > umbralSonido && proporcionGrave > 0.24 && graves > agudos * 0.75;
+  let posibleSostenido = duracionSonido > duracionSostenido && !posibleNoTonal && !posibleAgudo && !posibleGrave;
 
   if (posibleNoTonal) {
     estadoSonoro = "no tonal";
-  } else if (duracionSonido > 1400) {
-    estadoSonoro = "sostenido";
   } else if (posibleAgudo) {
     estadoSonoro = "agudo fuerte";
-  } else if (graves > agudos && graves >= medios && amplitudSuavizada < umbralAlto * 1.35) {
+  } else if (posibleGrave) {
     estadoSonoro = "grave bajo/medio";
+  } else if (posibleSostenido) {
+    estadoSonoro = "sostenido";
   } else {
     estadoSonoro = "sonido medio";
   }
@@ -408,6 +419,7 @@ function dibujarTrazos() {
       graves: graves,
       medios: medios,
       agudos: agudos,
+      sibilantes: sibilantes,
       diferenciaBandas: diferenciaBandas,
       umbralSonido: umbralSonido,
       umbralAlto: umbralAlto
@@ -461,7 +473,7 @@ function mostrarDebug() {
   push();
   noStroke();
   fill(0, 175);
-  rect(16, 16, 380, 390, 6);
+  rect(16, 16, 390, 445, 6);
 
   fill(255);
   textSize(15);
@@ -472,17 +484,19 @@ function mostrarDebug() {
   text("graves: " + int(graves), 28, 146);
   text("medios: " + int(medios), 28, 172);
   text("agudos: " + int(agudos), 28, 198);
-  text("dif bandas: " + int(diferenciaBandas), 28, 224);
-  text("duracion: " + int(duracionSonido) + " ms", 28, 250);
-  text("estado: " + estadoSonoro, 28, 276);
-  text("trazos: " + dibujos.length, 28, 302);
-  text("nucleo: " + int(nucleoX) + ", " + int(nucleoY), 28, 328);
-  text("dispersion: " + int(desviacionX) + ", " + int(desviacionY), 28, 354);
-  text("angulo: " + int(anguloDominante), 28, 380);
+  text("sibilantes: " + int(sibilantes), 28, 224);
+  text("dif bandas: " + int(diferenciaBandas), 28, 250);
+  text("duracion: " + int(duracionSonido) + " ms", 28, 276);
+  text("sostenido desde: " + duracionSostenido + " ms", 28, 302);
+  text("estado: " + estadoSonoro, 28, 328);
+  text("trazos: " + dibujos.length, 28, 354);
+  text("nucleo: " + int(nucleoX) + ", " + int(nucleoY), 28, 380);
+  text("dispersion: " + int(desviacionX) + ", " + int(desviacionY), 28, 406);
+  text("angulo: " + int(anguloDominante), 28, 432);
 
   let barra = map(amplitudSuavizada, 0, 0.12, 0, 330, true);
   fill(120, 220, 255);
-  rect(28, 392, barra, 10);
+  rect(28, 444, barra, 10);
   pop();
 }
 
@@ -495,3 +509,4 @@ function reiniciarObra() {
   estadoSonoro = audioActivo ? "silencio" : "mic inactivo";
   inicializarComposicion();
 }
+
