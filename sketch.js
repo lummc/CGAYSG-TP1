@@ -1,5 +1,6 @@
-let trazos = [];
-let cantidadTrazos = 27;
+let trazosVerticales = [];
+let trazosHorizontales = [];
+let trazosDiagonales = [];
 
 let fondos = [];
 let fondoActual = 0;
@@ -16,6 +17,8 @@ let audioIniciado = false;
 
 let amplitud = 0;
 let amplitudSuavizada = 0;
+let amplitudAnterior = 0;
+let incrementoAmplitud = 0;
 let graves = 0;
 let medios = 0;
 let agudos = 0;
@@ -24,6 +27,12 @@ let diferenciaBandas = 0;
 let duracionSonido = 0;
 let estadoSonoro = "silencio";
 let duracionSostenido = 2200;
+let estadoCandidato = "";
+let tiempoEstadoCandidato = 0;
+let tiempoParaDefinirFamilia = 700;
+let aplausoDetectado = false;
+let tiempoUltimoAplauso = -1000;
+let intervaloAplauso = 900;
 
 let umbralSonido = 0.005;
 let umbralAlto = 0.014;
@@ -48,18 +57,45 @@ let desviacionY;
 let desviacionBaseX;
 let desviacionBaseY;
 
-let anguloDominante;
-let anguloObjetivo;
-let angulosPorFondo = [0, 25, -30, 80, -18, 45];
+let familiaDefinida = false;
+let modoCompositivo = "";
+let anguloRector = 0;
+let variacionAngular = 15;
+let probabilidadFueraDeRegla = 0.03;
 
 function preload() {
-  for (let i = 1; i <= cantidadTrazos; i++) {
-    trazos[i] = loadImage("trazos/trazo" + i + ".png");
+  for (let i = 1; i <= 13; i++) {
+    let nombre = "trazos/trazo v " + i + ".png";
+    let imagen = loadImage(nombre);
+    imagen.nombreArchivo = nombre;
+    trazosVerticales.push(imagen);
+  }
+
+  let indicesHorizontales = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11];
+  for (let i = 0; i < indicesHorizontales.length; i++) {
+    let nombre = "trazos/trazo h " + indicesHorizontales[i] + ".png";
+    let imagen = loadImage(nombre);
+    imagen.nombreArchivo = nombre;
+    trazosHorizontales.push(imagen);
+  }
+
+  for (let i = 1; i <= 20; i++) {
+    let nombre = "trazos/trazo d " + i + ".png";
+    let imagen = loadImage(nombre);
+    imagen.nombreArchivo = nombre;
+    trazosDiagonales.push(imagen);
   }
 
   for (let i = 0; i <= 5; i++) {
     fondos[i] = loadImage("fondos/fondo" + i + ".png");
   }
+
+  console.log("preload()", {
+    trazosVerticales: trazosVerticales.length,
+    trazosHorizontales: trazosHorizontales.length,
+    trazosDiagonales: trazosDiagonales.length,
+    fondos: fondos.length
+  });
 }
 
 function setup() {
@@ -113,7 +149,11 @@ function keyPressed() {
   }
 
   if (key === "t" || key === "T") {
-    agregarTrazo("fino");
+    if (!familiaDefinida) {
+      definirFamiliaCompositiva("agudo fuerte");
+    }
+
+    agregarGrupoDeTrazos("fino");
   }
 }
 
@@ -141,16 +181,21 @@ function analizarAudio() {
   if (!audioActivo) {
     amplitud = 0;
     amplitudSuavizada = 0;
+    amplitudAnterior = 0;
+    incrementoAmplitud = 0;
     graves = 0;
     medios = 0;
     agudos = 0;
     sibilantes = 0;
     diferenciaBandas = 0;
     duracionSonido = 0;
+    aplausoDetectado = false;
     return;
   }
 
+  amplitudAnterior = amplitud;
   amplitud = mic.getLevel();
+  incrementoAmplitud = max(0, amplitud - amplitudAnterior);
   amplitudSuavizada = lerp(amplitudSuavizada, amplitud, 0.18);
 
   fft.analyze();
@@ -159,6 +204,8 @@ function analizarAudio() {
   agudos = fft.getEnergy(1800, 5000);
   sibilantes = fft.getEnergy(3000, 9000);
   diferenciaBandas = max(graves, medios, agudos) - min(graves, medios, agudos);
+
+  detectarAplauso();
 
   if (amplitudSuavizada > umbralSonido) {
     duracionSonido += deltaTime;
@@ -189,8 +236,14 @@ function actualizarEstadoSonoro() {
   let energiaRepartida = diferenciaBandas < 35 && medios > 10 && agudos > 10 && proporcionGrave < 0.45;
   let ruidoSibilante = sibilantes > 8 && (sibilantes > graves * 0.55 || proporcionAguda > 0.24);
   let posibleNoTonal = amplitudSuavizada > umbralSonido * 0.7 && (ruidoSibilante || energiaRepartida);
-  let posibleAgudo = amplitudSuavizada > umbralAlto && (proporcionAguda > 0.24 || proporcionMedia > proporcionGrave * 1.15);
-  let posibleGrave = amplitudSuavizada > umbralSonido && proporcionGrave > 0.24 && graves > agudos * 0.75;
+  let posibleAgudo =
+    amplitudSuavizada > umbralAlto * 0.85 &&
+    (proporcionAguda > 0.22 || sibilantes > 14 || agudos > graves * 1.05 || medios > graves * 1.25);
+  let posibleGrave =
+    amplitudSuavizada > umbralSonido * 1.3 &&
+    proporcionGrave > 0.38 &&
+    graves > medios * 1.15 &&
+    graves > agudos * 1.35;
   let posibleSostenido = duracionSonido > duracionSostenido && !posibleNoTonal && !posibleAgudo && !posibleGrave;
 
   if (posibleNoTonal) {
@@ -206,18 +259,74 @@ function actualizarEstadoSonoro() {
   }
 }
 
+function detectarAplauso() {
+  aplausoDetectado = false;
+
+  let ahora = millis();
+  let energiaGolpe = medios + agudos + sibilantes;
+  let predominioMedioAgudo = energiaGolpe > graves * 1.35;
+  let picoRepentino = amplitud > 0.045 && incrementoAmplitud > 0.025;
+  let sonidoBreve = duracionSonido < 280;
+  let sinCooldown = ahora - tiempoUltimoAplauso > intervaloAplauso;
+
+  if (picoRepentino && predominioMedioAgudo && sonidoBreve && sinCooldown) {
+    aplausoDetectado = true;
+    tiempoUltimoAplauso = ahora;
+  }
+}
+
+function actualizarCandidatoFamilia(nuevoEstado) {
+  let estadoValido =
+    nuevoEstado === "agudo fuerte" ||
+    nuevoEstado === "grave bajo/medio" ||
+    nuevoEstado === "sostenido" ||
+    nuevoEstado === "sonido medio" ||
+    nuevoEstado === "no tonal";
+
+  if (!estadoValido) {
+    estadoCandidato = "";
+    tiempoEstadoCandidato = 0;
+    return;
+  }
+
+  if (nuevoEstado !== estadoCandidato) {
+    estadoCandidato = nuevoEstado;
+    tiempoEstadoCandidato = 0;
+    return;
+  }
+
+  tiempoEstadoCandidato += deltaTime;
+
+  if (tiempoEstadoCandidato >= tiempoParaDefinirFamilia) {
+    definirFamiliaCompositiva(estadoCandidato);
+    estadoCandidato = "";
+    tiempoEstadoCandidato = 0;
+  }
+}
+
 function actualizarObra() {
   let ahora = millis();
+
+  if (aplausoDetectado) {
+    reiniciarObraPorAplauso();
+    return;
+  }
 
   actualizarComposicionSonora();
 
   if (estadoSonoro === "silencio" || estadoSonoro === "mic inactivo") {
+    actualizarCandidatoFamilia("");
     respirarObra();
     return;
   }
 
+  if (!familiaDefinida) {
+    actualizarCandidatoFamilia(estadoSonoro);
+    return;
+  }
+
   if (estadoSonoro === "agudo fuerte" && ahora - ultimoAgregar > intervaloAgregar) {
-    agregarTrazo("fino");
+    agregarGrupoDeTrazos("fino");
     ultimoAgregar = ahora;
   }
 
@@ -232,7 +341,7 @@ function actualizarObra() {
   }
 
   if (estadoSonoro === "sostenido" && ahora - ultimoAgregar > intervaloAgregar * 1.4) {
-    agregarTrazo("largo");
+    agregarGrupoDeTrazos("largo");
     ultimoAgregar = ahora;
   }
 
@@ -260,8 +369,12 @@ function inicializarComposicion() {
   desviacionX = desviacionBaseX;
   desviacionY = desviacionBaseY;
 
-  anguloDominante = angulosPorFondo[fondoActual];
-  anguloObjetivo = anguloDominante;
+  familiaDefinida = false;
+  modoCompositivo = "";
+  anguloRector = 0;
+  estadoCandidato = "";
+  tiempoEstadoCandidato = 0;
+  aplausoDetectado = false;
 }
 
 function actualizarComposicionSonora() {
@@ -270,27 +383,63 @@ function actualizarComposicionSonora() {
   let objetivoDesviacionX = desviacionBaseX;
   let objetivoDesviacionY = desviacionBaseY;
 
-  anguloObjetivo = angulosPorFondo[fondoActual];
-
   if (estadoSonoro === "agudo fuerte") {
     objetivoY = height * 0.45;
-    anguloObjetivo -= 8;
   } else if (estadoSonoro === "grave bajo/medio") {
     objetivoY = height * 0.60;
-    anguloObjetivo += 6;
   } else if (estadoSonoro === "sostenido") {
     objetivoDesviacionX = width * 0.15;
     objetivoDesviacionY = height * 0.18;
   } else if (estadoSonoro === "no tonal") {
     objetivoX = nucleoBaseX + sin(frameCount * 0.025) * width * 0.025;
-    anguloObjetivo += sin(frameCount * 0.02) * 7;
   }
 
   nucleoX = lerp(nucleoX, objetivoX, 0.025);
   nucleoY = lerp(nucleoY, objetivoY, 0.025);
   desviacionX = lerp(desviacionX, objetivoDesviacionX, 0.02);
   desviacionY = lerp(desviacionY, objetivoDesviacionY, 0.02);
-  anguloDominante = lerp(anguloDominante, anguloObjetivo, 0.03);
+}
+
+function definirFamiliaCompositiva(estadoInicial) {
+  if (familiaDefinida) {
+    return;
+  }
+
+  if (estadoInicial === "agudo fuerte") {
+    modoCompositivo = "vertical";
+    anguloRector = 90;
+  } else if (estadoInicial === "grave bajo/medio") {
+    modoCompositivo = "horizontal";
+    anguloRector = 0;
+  } else if (estadoInicial === "sostenido") {
+    modoCompositivo = "diagonal";
+    anguloRector = 45;
+  } else {
+    modoCompositivo = "diagonal_inversa";
+    anguloRector = -45;
+  }
+
+  familiaDefinida = true;
+
+  if (mostrarLogsTrazos) {
+    console.log("familia compositiva definida", {
+      estadoInicial: estadoInicial,
+      modoCompositivo: modoCompositivo,
+      anguloRector: anguloRector
+    });
+  }
+}
+
+function agregarGrupoDeTrazos(tipo) {
+  if (!familiaDefinida) {
+    definirFamiliaCompositiva(estadoSonoro);
+  }
+
+  let cantidad = int(random(3, 7));
+
+  for (let i = 0; i < cantidad; i++) {
+    agregarTrazo(tipo);
+  }
 }
 
 function agregarTrazo(tipo) {
@@ -298,15 +447,15 @@ function agregarTrazo(tipo) {
     dibujos.shift();
   }
 
-  let indice = int(random(1, cantidadTrazos + 1));
-  let direccion = elegirDireccion(tipo);
+  let fueraDeRegla = random() < probabilidadFueraDeRegla;
+  let imagen = elegirImagenTrazo(fueraDeRegla);
+  let direccion = modoCompositivo;
   let posicion = calcularPosicionGaussiana();
-  let variacionAngular = tipo === "largo" ? 9 : 14;
-  let anguloTrazo = anguloDominante + randomGaussian(0, variacionAngular);
+  let anguloTrazo = calcularRotacionTrazo(fueraDeRegla);
   let opacidad = elegirOpacidad(tipo);
 
   dibujos.push({
-    indice: indice,
+    imagen: imagen,
     x: posicion.x,
     y: posicion.y,
     altoVisible: 0,
@@ -315,21 +464,26 @@ function agregarTrazo(tipo) {
     velocidad: tipo === "largo" ? random(16, 34) : random(8, 22),
     direccion: direccion,
     angulo: anguloTrazo,
-    curva: random(-28, 28)
+    fueraDeRegla: fueraDeRegla,
+    curva: random(-28, 28),
+    desvaneciendo: false
   });
 
   if (mostrarLogsTrazos) {
     let dibujoNuevo = dibujos[dibujos.length - 1];
-    let imagenTrazo = trazos[dibujoNuevo.indice];
 
     console.log("agregarTrazo()", {
       cantidadDibujos: dibujos.length,
-      indice: dibujoNuevo.indice,
-      anchoOriginal: imagenTrazo ? imagenTrazo.width : "imagen no cargada",
-      altoOriginal: imagenTrazo ? imagenTrazo.height : "imagen no cargada",
+      modoCompositivo: modoCompositivo,
+      imagenElegida: imagen ? imagen.nombreArchivo : "imagen no cargada",
+      anchoOriginal: imagen ? imagen.width : "imagen no cargada",
+      altoOriginal: imagen ? imagen.height : "imagen no cargada",
+      x: dibujoNuevo.x,
+      y: dibujoNuevo.y,
       opacidad: dibujoNuevo.opacidad,
       escala: dibujoNuevo.escala,
       direccion: dibujoNuevo.direccion,
+      fueraDeRegla: dibujoNuevo.fueraDeRegla,
       nucleoX: nucleoX,
       nucleoY: nucleoY,
       desviacionX: desviacionX,
@@ -337,6 +491,45 @@ function agregarTrazo(tipo) {
       angulo: dibujoNuevo.angulo
     });
   }
+}
+
+function elegirImagenTrazo(fueraDeRegla) {
+  if (!fueraDeRegla) {
+    if (modoCompositivo === "vertical") {
+      return random(trazosVerticales);
+    }
+
+    if (modoCompositivo === "horizontal") {
+      return random(trazosHorizontales);
+    }
+
+    return random(trazosDiagonales);
+  }
+
+  let familiasAlternativas = [];
+
+  if (modoCompositivo !== "vertical") {
+    familiasAlternativas.push(trazosVerticales);
+  }
+
+  if (modoCompositivo !== "horizontal") {
+    familiasAlternativas.push(trazosHorizontales);
+  }
+
+  if (modoCompositivo !== "diagonal" && modoCompositivo !== "diagonal_inversa") {
+    familiasAlternativas.push(trazosDiagonales);
+  }
+
+  return random(random(familiasAlternativas));
+}
+
+function calcularRotacionTrazo(fueraDeRegla) {
+  if (!fueraDeRegla) {
+    return anguloRector + random(-variacionAngular, variacionAngular);
+  }
+
+  let desvio = random([random(65, 115), random(-115, -65)]);
+  return anguloRector + desvio;
 }
 
 function calcularPosicionGaussiana() {
@@ -381,8 +574,14 @@ function elegirDireccion(tipo) {
 }
 
 function borrarTrazo() {
-  if (dibujos.length > 0) {
-    dibujos.splice(int(random(dibujos.length)), 1);
+  let cantidad = min(int(random(2, 4)), dibujos.length);
+
+  for (let i = 0; i < cantidad; i++) {
+    let indice = dibujos.length - 1 - i;
+
+    if (indice >= 0) {
+      dibujos[indice].desvaneciendo = true;
+    }
   }
 }
 
@@ -394,7 +593,6 @@ function cambiarFondo() {
     fondoActual = 0;
   }
 
-  anguloObjetivo = angulosPorFondo[fondoActual];
   transicionFondo = 0;
 }
 
@@ -428,9 +626,11 @@ function dibujarTrazos() {
     ultimoLogTrazos = millis();
   }
 
-  for (let i = 0; i < dibujos.length; i++) {
+  imageMode(CENTER);
+
+  for (let i = dibujos.length - 1; i >= 0; i--) {
     let dibujo = dibujos[i];
-    let imagenTrazo = trazos[dibujo.indice];
+    let imagenTrazo = dibujo.imagen;
 
     if (!imagenTrazo) {
       continue;
@@ -438,7 +638,14 @@ function dibujarTrazos() {
 
     let anchoTrazo = imagenTrazo.width * dibujo.escala;
     let altoTrazo = imagenTrazo.height * dibujo.escala;
+
+    if (dibujo.altoVisible < altoTrazo) {
+      dibujo.altoVisible += dibujo.velocidad;
+    }
+
     let alturaActual = min(dibujo.altoVisible, altoTrazo);
+    let proporcionVisible = alturaActual / altoTrazo;
+    let altoFuente = imagenTrazo.height * proporcionVisible;
 
     push();
     translate(dibujo.x, dibujo.y);
@@ -451,52 +658,71 @@ function dibujarTrazos() {
     tint(255, dibujo.opacidad);
     image(
       imagenTrazo,
-      -anchoTrazo / 2,
-      -altoTrazo / 2,
+      0,
+      -altoTrazo / 2 + alturaActual / 2,
       anchoTrazo,
       alturaActual,
       0,
       0,
       imagenTrazo.width,
-      alturaActual / dibujo.escala
+      altoFuente
     );
     noTint();
     pop();
 
-    if (dibujo.altoVisible < altoTrazo) {
-      dibujo.altoVisible += dibujo.velocidad;
+    if (dibujo.desvaneciendo) {
+      dibujo.opacidad -= 8;
+
+      if (dibujo.opacidad <= 0) {
+        noTint();
+        imageMode(CORNER);
+        dibujos.splice(i, 1);
+        imageMode(CENTER);
+      }
     }
   }
+
+  noTint();
+  imageMode(CORNER);
 }
 
 function mostrarDebug() {
   push();
+  imageMode(CORNER);
   noStroke();
+  noTint();
   fill(0, 175);
-  rect(16, 16, 390, 445, 6);
+  rect(16, 16, 450, 630, 6);
 
   fill(255);
   textSize(15);
-  text("click o tecla A: activar audio", 28, 42);
-  text("mic activo: " + audioActivo, 28, 68);
-  text("amplitud: " + nf(amplitud, 1, 4), 28, 94);
-  text("amp suave: " + nf(amplitudSuavizada, 1, 4), 28, 120);
-  text("graves: " + int(graves), 28, 146);
-  text("medios: " + int(medios), 28, 172);
-  text("agudos: " + int(agudos), 28, 198);
-  text("sibilantes: " + int(sibilantes), 28, 224);
-  text("dif bandas: " + int(diferenciaBandas), 28, 250);
-  text("duracion: " + int(duracionSonido) + " ms", 28, 276);
-  text("sostenido desde: " + duracionSostenido + " ms", 28, 302);
-  text("estado: " + estadoSonoro, 28, 328);
-  text("trazos: " + dibujos.length, 28, 354);
-  text("nucleo: " + int(nucleoX) + ", " + int(nucleoY), 28, 380);
-  text("dispersion: " + int(desviacionX) + ", " + int(desviacionY), 28, 406);
-  text("angulo: " + int(anguloDominante), 28, 432);
+  text("A/click: activar audio | T: test trazos | D: debug", 28, 42);
+  text("R: desvanecer | F/espacio: fondo | X: reiniciar", 28, 68);
+  text("audioActivo: " + audioActivo, 28, 100);
+  text("amplitud: " + nf(amplitud, 1, 4), 28, 126);
+  text("amp suavizada: " + nf(amplitudSuavizada, 1, 4), 28, 152);
+  text("graves: " + int(graves), 28, 178);
+  text("medios: " + int(medios), 28, 204);
+  text("agudos: " + int(agudos), 28, 230);
+  text("sibilantes: " + int(sibilantes), 28, 256);
+  text("dif bandas: " + int(diferenciaBandas), 28, 282);
+  text("duracion: " + int(duracionSonido) + " ms", 28, 308);
+  text("estadoSonoro: " + estadoSonoro, 28, 334);
+  text("estado candidato: " + estadoCandidato, 28, 360);
+  text("tiempo candidato: " + int(tiempoEstadoCandidato) + " / " + tiempoParaDefinirFamilia + " ms", 28, 386);
+  text("aplauso detectado: " + aplausoDetectado, 28, 412);
+  text("subida amp: " + nf(incrementoAmplitud, 1, 4), 28, 438);
+  text("dibujos: " + dibujos.length, 28, 464);
+  text("familiaDefinida: " + familiaDefinida, 28, 490);
+  text("modoCompositivo: " + modoCompositivo, 28, 516);
+  text("anguloRector: " + int(anguloRector), 28, 542);
+  text("nucleo: " + int(nucleoX) + ", " + int(nucleoY), 28, 568);
+  text("desviacion: " + int(desviacionX) + ", " + int(desviacionY), 28, 594);
+  text("fondo/transicion: " + fondoActual + " / " + nf(transicionFondo, 1, 2), 28, 620);
 
-  let barra = map(amplitudSuavizada, 0, 0.12, 0, 330, true);
+  let barra = map(amplitudSuavizada, 0, 0.12, 0, 360, true);
   fill(120, 220, 255);
-  rect(28, 444, barra, 10);
+  rect(28, 632, barra, 10);
   pop();
 }
 
@@ -510,3 +736,17 @@ function reiniciarObra() {
   inicializarComposicion();
 }
 
+function reiniciarObraPorAplauso() {
+  dibujos = [];
+  fondoActual = 0;
+  fondoAnterior = 0;
+  transicionFondo = 1;
+  duracionSonido = 0;
+  estadoSonoro = "silencio";
+  inicializarComposicion();
+  aplausoDetectado = true;
+
+  if (mostrarLogsTrazos) {
+    console.log("aplauso detectado: reinicio total de obra");
+  }
+}
